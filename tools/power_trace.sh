@@ -34,7 +34,7 @@ DMESG="dmesg.txt"
 LOGFILE="log.txt"
 WAKETIME=""
 DISPLAY=""
-POWER_EVENTS="clock_enable clock_disable clock_set_parent clock_set_rate cpu_idle cpu_frequency machine_suspend pm_wake_lock pm_wake_unlock power_start power_end wakeup_source_activate wakeup_source_deactivate"
+POWER_EVENTS="clock_enable clock_disable clock_set_rate cpu_idle cpu_frequency pm_wake_lock pm_wake_unlock wakeup_source_activate wakeup_source_deactivate"
 
 checkDisplay() {
 	SCRSTAT=`dumpsys power 2>&1 | grep mScreenOn`
