@@ -42,7 +42,7 @@ import analyze_suspend as aslib
 #	 store system values and test parameters
 class SystemValues(aslib.SystemValues):
 	title = 'BootGraph'
-	version = '2.1a'
+	version = '2.2a'
 	hostname = 'localhost'
 	testtime = ''
 	kernel = ''
@@ -51,7 +51,6 @@ class SystemValues(aslib.SystemValues):
 	htmlfile = 'bootgraph.html'
 	outfile = ''
 	testdir = ''
-	testdirprefix = 'boot'
 	embedded = False
 	testlog = False
 	dmesglog = False
@@ -66,6 +65,8 @@ class SystemValues(aslib.SystemValues):
 	manual = False
 	iscronjob = False
 	timeformat = '%.6f'
+	bootloader = 'grub'
+	blexec = []
 	def __init__(self):
 		if('LOG_FILE' in os.environ and 'TEST_RESULTS_IDENTIFIER' in os.environ):
 			self.embedded = True
@@ -84,39 +85,76 @@ class SystemValues(aslib.SystemValues):
 		self.testdir = datetime.now().strftime('boot-%y%m%d-%H%M%S')
 	def kernelVersion(self, msg):
 		return msg.split()[2]
+	def checkFtraceKernelVersion(self):
+		val = tuple(map(int, self.kernel.split('-')[0].split('.')))
+		if val >= (4, 10, 0):
+			return True
+		return False
 	def kernelParams(self):
 		cmdline = 'initcall_debug log_buf_len=32M'
 		if self.useftrace:
-			cmdline += ' trace_buf_size=128M trace_clock=global '\
+			if self.cpucount > 0:
+				bs = min(self.memtotal / 2, 2*1024*1024) / self.cpucount
+			else:
+				bs = 131072
+			cmdline += ' trace_buf_size=%dK trace_clock=global '\
 			'trace_options=nooverwrite,funcgraph-abstime,funcgraph-cpu,'\
 			'funcgraph-duration,funcgraph-proc,funcgraph-tail,'\
 			'nofuncgraph-overhead,context-info,graph-time '\
 			'ftrace=function_graph '\
 			'ftrace_graph_max_depth=%d '\
 			'ftrace_graph_filter=%s' % \
-				(self.max_graph_depth, self.graph_filter)
+				(bs, self.max_graph_depth, self.graph_filter)
 		return cmdline
 	def setGraphFilter(self, val):
-		fp = open(self.tpath+'available_filter_functions')
-		master = fp.read().split('\n')
-		fp.close()
+		master = self.getBootFtraceFilterFunctions()
+		fs = ''
 		for i in val.split(','):
 			func = i.strip()
+			if func == '':
+				doError('badly formatted filter function string')
+			if '[' in func or ']' in func:
+				doError('loadable module functions not allowed - "%s"' % func)
+			if ' ' in func:
+				doError('spaces found in filter functions - "%s"' % func)
 			if func not in master:
 				doError('function "%s" not available for ftrace' % func)
-		self.graph_filter = val
+			if not fs:
+				fs = func
+			else:
+				fs += ','+func
+		if not fs:
+			doError('badly formatted filter function string')
+		self.graph_filter = fs
+	def getBootFtraceFilterFunctions(self):
+		self.rootCheck(True)
+		fp = open(self.tpath+'available_filter_functions')
+		fulllist = fp.read().split('\n')
+		fp.close()
+		list = []
+		for i in fulllist:
+			if not i or ' ' in i or '[' in i or ']' in i:
+				continue
+			list.append(i)
+		return list
+	def myCronJob(self, line):
+		if '@reboot' not in line:
+			return False
+		if 'bootgraph' in line or 'analyze_boot.py' in line or '-cronjob' in line:
+			return True
+		return False
 	def cronjobCmdString(self):
 		cmdline = '%s -cronjob' % os.path.abspath(sys.argv[0])
 		args = iter(sys.argv[1:])
 		for arg in args:
 			if arg in ['-h', '-v', '-cronjob', '-reboot']:
 				continue
-			elif arg in ['-o', '-dmesg', '-ftrace', '-filter']:
+			elif arg in ['-o', '-dmesg', '-ftrace', '-func']:
 				args.next()
 				continue
 			cmdline += ' '+arg
 		if self.graph_filter != 'do_one_initcall':
-			cmdline += ' -filter "%s"' % self.graph_filter
+			cmdline += ' -func "%s"' % self.graph_filter
 		cmdline += ' -o "%s"' % os.path.abspath(self.testdir)
 		return cmdline
 	def manualRebootRequired(self):
@@ -127,6 +165,31 @@ class SystemValues(aslib.SystemValues):
 		print '3. After reboot, re-run this tool with the same arguments but no command (w/o -reboot or -manual).\n'
 		print 'CMDLINE="%s"' % cmdline
 		sys.exit()
+	def blGrub(self):
+		blcmd = ''
+		for cmd in ['update-grub', 'grub-mkconfig', 'grub2-mkconfig']:
+			if blcmd:
+				break
+			blcmd = self.getExec(cmd)
+		if not blcmd:
+			doError('[GRUB] missing update command')
+		if not os.path.exists('/etc/default/grub'):
+			doError('[GRUB] missing /etc/default/grub')
+		if 'grub2' in blcmd:
+			cfg = '/boot/grub2/grub.cfg'
+		else:
+			cfg = '/boot/grub/grub.cfg'
+		if not os.path.exists(cfg):
+			doError('[GRUB] missing %s' % cfg)
+		if 'update-grub' in blcmd:
+			self.blexec = [blcmd]
+		else:
+			self.blexec = [blcmd, '-o', cfg]
+	def getBootLoader(self):
+		if self.bootloader == 'grub':
+			self.blGrub()
+		else:
+			doError('unknown boot loader: %s' % self.bootloader)
 
 sysvals = SystemValues()
 
@@ -142,20 +205,23 @@ class Data(aslib.Data):
 	idstr = ''
 	html_device_id = 0
 	valid = False
-	initstart = 0.0
+	tUserMode = 0.0
 	boottime = ''
-	phases = ['boot']
+	phases = ['kernel', 'user']
 	do_one_initcall = False
 	def __init__(self, num):
 		self.testnumber = num
 		self.idstr = 'a'
 		self.dmesgtext = []
 		self.dmesg = {
-			'boot': {'list': dict(), 'start': -1.0, 'end': -1.0, 'row': 0, 'color': '#dddddd'}
+			'kernel': {'list': dict(), 'start': -1.0, 'end': -1.0, 'row': 0,
+				'order': 0, 'color': 'linear-gradient(to bottom, #fff, #bcf)'},
+			'user': {'list': dict(), 'start': -1.0, 'end': -1.0, 'row': 0,
+				'order': 1, 'color': '#fff'}
 		}
 	def deviceTopology(self):
 		return ''
-	def newAction(self, phase, name, start, end, ret, ulen):
+	def newAction(self, phase, name, pid, start, end, ret, ulen):
 		# new device callback for a specific phase
 		self.html_device_id += 1
 		devid = '%s%d' % (self.idstr, self.html_device_id)
@@ -169,27 +235,30 @@ class Data(aslib.Data):
 			name = '%s[%d]' % (origname, i)
 			i += 1
 		list[name] = {'name': name, 'start': start, 'end': end,
-			'pid': 0, 'length': length, 'row': 0, 'id': devid,
+			'pid': pid, 'length': length, 'row': 0, 'id': devid,
 			'ret': ret, 'ulen': ulen }
 		return name
-	def deviceMatch(self, cg):
+	def deviceMatch(self, pid, cg):
 		if cg.end - cg.start == 0:
-			return True
-		list = self.dmesg['boot']['list']
-		for devname in list:
-			dev = list[devname]
-			if cg.name == 'do_one_initcall':
-				if(cg.start <= dev['start'] and cg.end >= dev['end'] and dev['length'] > 0):
-					dev['ftrace'] = cg
-					self.do_one_initcall = True
-					return True
-			else:
-				if(cg.start > dev['start'] and cg.end < dev['end']):
-					if 'ftraces' not in dev:
-						dev['ftraces'] = []
-					dev['ftraces'].append(cg)
-					return True
-		return False
+			return ''
+		for p in data.phases:
+			list = self.dmesg[p]['list']
+			for devname in list:
+				dev = list[devname]
+				if pid != dev['pid']:
+					continue
+				if cg.name == 'do_one_initcall':
+					if(cg.start <= dev['start'] and cg.end >= dev['end'] and dev['length'] > 0):
+						dev['ftrace'] = cg
+						self.do_one_initcall = True
+						return devname
+				else:
+					if(cg.start > dev['start'] and cg.end < dev['end']):
+						if 'ftraces' not in dev:
+							dev['ftraces'] = []
+						dev['ftraces'].append(cg)
+						return devname
+		return ''
 
 # ----------------- FUNCTIONS --------------------
 
@@ -197,8 +266,9 @@ class Data(aslib.Data):
 # Description:
 #	 parse a kernel log for boot data
 def parseKernelLog():
+	phase = 'kernel'
 	data = Data(0)
-	data.dmesg['boot']['start'] = data.start = ktime = 0.0
+	data.dmesg['kernel']['start'] = data.start = ktime = 0.0
 	sysvals.stamp = {
 		'time': datetime.now().strftime('%B %d %Y, %I:%M:%S %p'),
 		'host': sysvals.hostname,
@@ -229,7 +299,6 @@ def parseKernelLog():
 		if(ktime > 120):
 			break
 		msg = m.group('msg')
-		data.end = data.initstart = ktime
 		data.dmesgtext.append(line)
 		if(ktime == 0.0 and re.match('^Linux version .*', msg)):
 			if(not sysvals.stamp['kernel']):
@@ -242,26 +311,32 @@ def parseKernelLog():
 			data.boottime = bt.strftime('%Y-%m-%d_%H:%M:%S')
 			sysvals.stamp['time'] = bt.strftime('%B %d %Y, %I:%M:%S %p')
 			continue
-		m = re.match('^calling *(?P<f>.*)\+.*', msg)
+		m = re.match('^calling *(?P<f>.*)\+.* @ (?P<p>[0-9]*)', msg)
 		if(m):
-			devtemp[m.group('f')] = ktime
+			func = m.group('f')
+			pid = int(m.group('p'))
+			devtemp[func] = (ktime, pid)
 			continue
 		m = re.match('^initcall *(?P<f>.*)\+.* returned (?P<r>.*) after (?P<t>.*) usecs', msg)
 		if(m):
 			data.valid = True
+			data.end = ktime
 			f, r, t = m.group('f', 'r', 't')
 			if(f in devtemp):
-				data.newAction('boot', f, devtemp[f], ktime, int(r), int(t))
-				data.end = ktime
+				start, pid = devtemp[f]
+				data.newAction(phase, f, pid, start, ktime, int(r), int(t))
 				del devtemp[f]
 			continue
 		if(re.match('^Freeing unused kernel memory.*', msg)):
-			break
+			data.tUserMode = ktime
+			data.dmesg['kernel']['end'] = ktime
+			data.dmesg['user']['start'] = ktime
+			phase = 'user'
 
 	if tp.stamp:
 		sysvals.stamp = 0
 		tp.parseStamp(data, sysvals)
-	data.dmesg['boot']['end'] = data.end
+	data.dmesg['user']['end'] = data.end
 	lf.close()
 	return data
 
@@ -269,6 +344,15 @@ def parseKernelLog():
 # Description:
 #	 Check if trace is available and copy to a temp file
 def parseTraceLog(data):
+	# if available, calculate cgfilter allowable ranges
+	cgfilter = []
+	if len(sysvals.cgfilter) > 0:
+		for p in data.phases:
+			list = data.dmesg[p]['list']
+			for i in sysvals.cgfilter:
+				if i in list:
+					cgfilter.append([list[i]['start']-0.001,
+						list[i]['end']+0.001])
 	# parse the trace log
 	ftemp = dict()
 	tp = aslib.TestProps()
@@ -282,7 +366,16 @@ def parseTraceLog(data):
 			continue
 		m_time, m_proc, m_pid, m_msg, m_dur = \
 			m.group('time', 'proc', 'pid', 'msg', 'dur')
-		if float(m_time) > data.end:
+		t = float(m_time)
+		if len(cgfilter) > 0:
+			allow = False
+			for r in cgfilter:
+				if t >= r[0] and t < r[1]:
+					allow = True
+					break
+			if not allow:
+				continue
+		if t > data.end:
 			break
 		if(m_time and m_pid and m_msg):
 			t = aslib.FTraceLine(m_time, m_msg, m_dur)
@@ -296,23 +389,34 @@ def parseTraceLog(data):
 			ftemp[key] = []
 			ftemp[key].append(aslib.FTraceCallGraph(pid))
 		cg = ftemp[key][-1]
-		if(cg.addLine(t)):
+		res = cg.addLine(t, sysvals.verbose)
+		if(res != 0):
 			ftemp[key].append(aslib.FTraceCallGraph(pid))
+		if(res == -1):
+			ftemp[key][-1].addLine(t, sysvals.verbose)
+
 	tf.close()
 
 	# add the callgraph data to the device hierarchy
 	for key in ftemp:
 		proc, pid = key
 		for cg in ftemp[key]:
-			if len(cg.list) < 1 or cg.invalid:
+			if len(cg.list) < 1 or cg.invalid or (cg.end - cg.start == 0):
 				continue
 			if(not cg.postProcess()):
 				print('Sanity check failed for %s-%d' % (proc, pid))
 				continue
 			# match cg data to devices
-			if not data.deviceMatch(cg):
-				print ' BAD: %s %s-%d [%f - %f]' % (cg.name, proc, pid, cg.start, cg.end)
-
+			devname = data.deviceMatch(pid, cg)
+			if not devname:
+				kind = 'orphan'
+				if cg.partial:
+					kind = 'partial'
+				print 'WARNING: %s callgraph found for %s %s-%d [%f - %f]' %\
+					(kind, cg.name, proc, pid, cg.start, cg.end)
+			elif len(cg.list) > 1000000:
+				print 'WARNING: the callgraph found for %s is massive! (%d lines)' %\
+					(devname, len(cg.list))
 # Function: retrieveLogs
 # Description:
 #	 Create copies of dmesg and/or ftrace for later processing
@@ -323,6 +427,7 @@ def retrieveLogs():
 		if tracer != 'function_graph':
 			doError('ftrace not configured for a boot callgraph')
 	# create the folder and get dmesg
+	sysvals.systemInfo(aslib.dmidecode(sysvals.mempath))
 	sysvals.initTestOutput('boot')
 	sysvals.writeDatafileHeader(sysvals.dmesgfile)
 	call('dmesg >> '+sysvals.dmesgfile, shell=True)
@@ -380,7 +485,8 @@ def createBootGraph(data):
 	# html function templates
 	html_srccall = '<div id={6} title="{5}" class="srccall" style="left:{1}%;top:{2}px;height:{3}px;width:{4}%;line-height:{3}px;">{0}</div>\n'
 	html_timetotal = '<table class="time1">\n<tr>'\
-		'<td class="blue">Time from Kernel Boot to start of User Mode: <b>{0} ms</b></td>'\
+		'<td class="blue">Init process starts @ <b>{0} ms</b></td>'\
+		'<td class="blue">Last initcall ends @ <b>{1} ms</b></td>'\
 		'</tr>\n</table>\n'
 
 	# device timeline
@@ -396,83 +502,97 @@ def createBootGraph(data):
 	if(tTotal == 0):
 		print('ERROR: No timeline data')
 		return False
-	boot_time = '%.0f'%(tTotal*1000)
-	devtl.html += html_timetotal.format(boot_time)
+	user_mode = '%.0f'%(data.tUserMode*1000)
+	last_init = '%.0f'%(tTotal*1000)
+	devtl.html += html_timetotal.format(user_mode, last_init)
 
 	# determine the maximum number of rows we need to draw
-	phase = 'boot'
-	list = data.dmesg[phase]['list']
 	devlist = []
-	for devname in list:
-		d = aslib.DevItem(0, phase, list[devname])
-		devlist.append(d)
-	devtl.getPhaseRows(devlist)
+	for p in data.phases:
+		list = data.dmesg[p]['list']
+		for devname in list:
+			d = aslib.DevItem(0, p, list[devname])
+			devlist.append(d)
+		devtl.getPhaseRows(devlist, 0, 'start')
 	devtl.calcTotalRows()
 
 	# draw the timeline background
 	devtl.createZoomBox()
-	boot = data.dmesg[phase]
-	length = boot['end']-boot['start']
-	left = '%.3f' % (((boot['start']-t0)*100.0)/tTotal)
-	width = '%.3f' % ((length*100.0)/tTotal)
-	devtl.html += devtl.html_tblock.format(phase, left, width, devtl.scaleH)
-	devtl.html += devtl.html_phase.format('0', '100', \
-		'%.3f'%devtl.scaleH, '%.3f'%devtl.bodyH, \
-		'white', '')
+	devtl.html += devtl.html_tblock.format('boot', '0', '100', devtl.scaleH)
+	for p in data.phases:
+		phase = data.dmesg[p]
+		length = phase['end']-phase['start']
+		left = '%.3f' % (((phase['start']-t0)*100.0)/tTotal)
+		width = '%.3f' % ((length*100.0)/tTotal)
+		devtl.html += devtl.html_phase.format(left, width, \
+			'%.3f'%devtl.scaleH, '%.3f'%devtl.bodyH, \
+			phase['color'], '')
 
 	# draw the device timeline
 	num = 0
 	devstats = dict()
-	for devname in sorted(list):
-		cls, color = colorForName(devname)
-		dev = list[devname]
-		info = '@|%.3f|%.3f|%.3f|%d' % (dev['start']*1000.0, dev['end']*1000.0,
-			dev['ulen']/1000.0, dev['ret'])
-		devstats[dev['id']] = {'info':info}
-		dev['color'] = color
-		height = devtl.phaseRowHeight(0, phase, dev['row'])
-		top = '%.6f' % ((dev['row']*height) + devtl.scaleH)
-		left = '%.6f' % (((dev['start']-t0)*100)/tTotal)
-		width = '%.6f' % (((dev['end']-dev['start'])*100)/tTotal)
-		length = ' (%0.3f ms) ' % ((dev['end']-dev['start'])*1000)
-		devtl.html += devtl.html_device.format(dev['id'],
-			devname+length+'kernel_mode', left, top, '%.3f'%height,
-			width, devname, ' '+cls, '')
-		rowtop = devtl.phaseRowTop(0, phase, dev['row'])
-		height = '%.6f' % (devtl.rowH / 2)
-		top = '%.6f' % (rowtop + devtl.scaleH + (devtl.rowH / 2))
-		if data.do_one_initcall:
-			if('ftrace' not in dev):
+	for phase in data.phases:
+		list = data.dmesg[phase]['list']
+		for devname in sorted(list):
+			cls, color = colorForName(devname)
+			dev = list[devname]
+			info = '@|%.3f|%.3f|%.3f|%d' % (dev['start']*1000.0, dev['end']*1000.0,
+				dev['ulen']/1000.0, dev['ret'])
+			devstats[dev['id']] = {'info':info}
+			dev['color'] = color
+			height = devtl.phaseRowHeight(0, phase, dev['row'])
+			top = '%.6f' % ((dev['row']*height) + devtl.scaleH)
+			left = '%.6f' % (((dev['start']-t0)*100)/tTotal)
+			width = '%.6f' % (((dev['end']-dev['start'])*100)/tTotal)
+			length = ' (%0.3f ms) ' % ((dev['end']-dev['start'])*1000)
+			devtl.html += devtl.html_device.format(dev['id'],
+				devname+length+phase+'_mode', left, top, '%.3f'%height,
+				width, devname, ' '+cls, '')
+			rowtop = devtl.phaseRowTop(0, phase, dev['row'])
+			height = '%.6f' % (devtl.rowH / 2)
+			top = '%.6f' % (rowtop + devtl.scaleH + (devtl.rowH / 2))
+			if data.do_one_initcall:
+				if('ftrace' not in dev):
+					continue
+				cg = dev['ftrace']
+				large, stats = cgOverview(cg, 0.001)
+				devstats[dev['id']]['fstat'] = stats
+				for l in large:
+					left = '%f' % (((l.time-t0)*100)/tTotal)
+					width = '%f' % (l.length*100/tTotal)
+					title = '%s (%0.3fms)' % (l.name, l.length * 1000.0)
+					devtl.html += html_srccall.format(l.name, left,
+						top, height, width, title, 'x%d'%num)
+					num += 1
 				continue
-			cg = dev['ftrace']
-			large, stats = cgOverview(cg, 0.001)
-			devstats[dev['id']]['fstat'] = stats
-			for l in large:
-				left = '%f' % (((l.time-t0)*100)/tTotal)
-				width = '%f' % (l.length*100/tTotal)
-				title = '%s (%0.3fms)' % (l.name, l.length * 1000.0)
-				devtl.html += html_srccall.format(l.name, left,
-					top, height, width, title, 'x%d'%num)
+			if('ftraces' not in dev):
+				continue
+			for cg in dev['ftraces']:
+				left = '%f' % (((cg.start-t0)*100)/tTotal)
+				width = '%f' % ((cg.end-cg.start)*100/tTotal)
+				cglen = (cg.end - cg.start) * 1000.0
+				title = '%s (%0.3fms)' % (cg.name, cglen)
+				cg.id = 'x%d' % num
+				devtl.html += html_srccall.format(cg.name, left,
+					top, height, width, title, dev['id']+cg.id)
 				num += 1
-			continue
-		if('ftraces' not in dev):
-			continue
-		for cg in dev['ftraces']:
-			left = '%f' % (((cg.start-t0)*100)/tTotal)
-			width = '%f' % ((cg.end-cg.start)*100/tTotal)
-			cglen = (cg.end - cg.start) * 1000.0
-			title = '%s (%0.3fms)' % (cg.name, cglen)
-			cg.id = 'x%d' % num
-			devtl.html += html_srccall.format(cg.name, left,
-				top, height, width, title, dev['id']+cg.id)
-			num += 1
 
 	# draw the time scale, try to make the number of labels readable
-	devtl.createTimeScale(t0, tMax, tTotal, phase)
+	devtl.createTimeScale(t0, tMax, tTotal, 'boot')
 	devtl.html += '</div>\n'
 
 	# timeline is finished
 	devtl.html += '</div>\n</div>\n'
+
+	# draw a legend which describes the phases by color
+	devtl.html += '<div class="legend">\n'
+	pdelta = 20.0
+	pmargin = 36.0
+	for phase in data.phases:
+		order = '%.2f' % ((data.dmesg[phase]['order'] * pdelta) + pmargin)
+		devtl.html += devtl.html_legend.format(order, \
+			data.dmesg[phase]['color'], phase+'_mode', phase[0])
+	devtl.html += '</div>\n'
 
 	if(sysvals.outfile == sysvals.htmlfile):
 		hf = open(sysvals.htmlfile, 'a')
@@ -518,9 +638,11 @@ def createBootGraph(data):
 	html = \
 		'<div id="devicedetailtitle"></div>\n'\
 		'<div id="devicedetail" style="display:none;">\n'\
-		'<div id="devicedetail0">\n'\
-		'<div id="kernel_mode" class="phaselet" style="left:0%;width:100%;background:#DDDDDD"></div>\n'\
-		'</div>\n</div>\n'\
+		'<div id="devicedetail0">\n'
+	for p in data.phases:
+		phase = data.dmesg[p]
+		html += devtl.html_phaselet.format(p+'_mode', '0', '100', phase['color'])
+	html += '</div>\n</div>\n'\
 		'<script type="text/javascript">\n'+statinfo+\
 		'</script>\n'
 	hf.write(html)
@@ -544,7 +666,7 @@ def createBootGraph(data):
 	else:
 		# embedded out will be loaded in a page, skip the js
 		hf.write('<div id=bounds style=display:none>%f,%f</div>' % \
-			(data.start*1000, data.initstart*1000))
+			(data.start*1000, data.end*1000))
 	hf.close()
 	return True
 
@@ -556,17 +678,20 @@ def updateCron(restore=False):
 	if not restore:
 		sysvals.rootUser(True)
 	crondir = '/var/spool/cron/crontabs/'
-	cronfile = crondir+'root'
-	backfile = crondir+'root-analyze_boot-backup'
+	if not os.path.exists(crondir):
+		crondir = '/var/spool/cron/'
 	if not os.path.exists(crondir):
 		doError('%s not found' % crondir)
-	out = Popen(['which', 'crontab'], stdout=PIPE).stdout.read()
-	if not out:
+	cronfile = crondir+'root'
+	backfile = crondir+'root-analyze_boot-backup'
+	cmd = sysvals.getExec('crontab')
+	if not cmd:
 		doError('crontab not found')
 	# on restore: move the backup cron back into place
 	if restore:
 		if os.path.exists(backfile):
 			shutil.move(backfile, cronfile)
+			call([cmd, cronfile])
 		return
 	# backup current cron and install new one with reboot
 	if os.path.exists(cronfile):
@@ -579,13 +704,13 @@ def updateCron(restore=False):
 		fp = open(backfile, 'r')
 		op = open(cronfile, 'w')
 		for line in fp:
-			if '@reboot' not in line:
+			if not sysvals.myCronJob(line):
 				op.write(line)
 				continue
 		fp.close()
 		op.write('@reboot python %s\n' % sysvals.cronjobCmdString())
 		op.close()
-		res = call('crontab %s' % cronfile, shell=True)
+		res = call([cmd, cronfile])
 	except Exception, e:
 		print 'Exception: %s' % str(e)
 		shutil.move(backfile, cronfile)
@@ -600,25 +725,16 @@ def updateGrub(restore=False):
 	# call update-grub on restore
 	if restore:
 		try:
-			call(['update-grub'], stderr=PIPE, stdout=PIPE,
+			call(sysvals.blexec, stderr=PIPE, stdout=PIPE,
 				env={'PATH': '.:/sbin:/usr/sbin:/usr/bin:/sbin:/bin'})
 		except Exception, e:
 			print 'Exception: %s\n' % str(e)
 		return
-	# verify we can do this
-	sysvals.rootUser(True)
-	grubfile = '/etc/default/grub'
-	if not os.path.exists(grubfile):
-		print 'ERROR: Unable to set the kernel parameters via grub.\n'
-		sysvals.manualRebootRequired()
-	out = Popen(['which', 'update-grub'], stdout=PIPE).stdout.read()
-	if not out:
-		print 'ERROR: Unable to set the kernel parameters via grub.\n'
-		sysvals.manualRebootRequired()
-
 	# extract the option and create a grub config without it
+	sysvals.rootUser(True)
 	tgtopt = 'GRUB_CMDLINE_LINUX_DEFAULT'
 	cmdline = ''
+	grubfile = '/etc/default/grub'
 	tempfile = '/etc/default/grub.analyze_boot'
 	shutil.move(grubfile, tempfile)
 	res = -1
@@ -645,7 +761,7 @@ def updateGrub(restore=False):
 		# if the target option value is in quotes, strip them
 		sp = '"'
 		val = cmdline.strip()
-		if val[0] == '\'' or val[0] == '"':
+		if val and (val[0] == '\'' or val[0] == '"'):
 			sp = val[0]
 			val = val.strip(sp)
 		cmdline = val
@@ -656,7 +772,7 @@ def updateGrub(restore=False):
 		# write out the updated target option
 		op.write('\n%s=%s%s%s\n' % (tgtopt, sp, cmdline, sp))
 		op.close()
-		res = call('update-grub')
+		res = call(sysvals.blexec)
 		os.remove(grubfile)
 	except Exception, e:
 		print 'Exception: %s' % str(e)
@@ -664,7 +780,16 @@ def updateGrub(restore=False):
 	# cleanup
 	shutil.move(tempfile, grubfile)
 	if res != 0:
-		doError('update-grub failed')
+		doError('update grub failed')
+
+# Function: updateKernelParams
+# Description:
+#	 update boot conf for all kernels with our parameters
+def updateKernelParams(restore=False):
+	# find the boot loader
+	sysvals.getBootLoader()
+	if sysvals.bootloader == 'grub':
+		updateGrub(restore)
 
 # Function: doError Description:
 #	 generic error function for catastrphic failures
@@ -701,23 +826,29 @@ def printHelp():
 	print('Options:')
 	print('  -h            Print this help text')
 	print('  -v            Print the current tool version')
+	print('  -verbose      Print extra information during execution and analysis')
 	print('  -addlogs      Add the dmesg log to the html output')
 	print('  -o name       Overrides the output subdirectory name when running a new test')
 	print('                default: boot-{date}-{time}')
 	print(' [advanced]')
-	print('  -f            Use ftrace to add function detail (default: disabled)')
-	print('  -callgraph    Add callgraph detail, can be very large (default: disabled)')
+	print('  -fstat        Use ftrace to add function detail and statistics (default: disabled)')
+	print('  -f/-callgraph Add callgraph detail, can be very large (default: disabled)')
 	print('  -maxdepth N   limit the callgraph data to N call levels (default: 2)')
 	print('  -mincg ms     Discard all callgraphs shorter than ms milliseconds (e.g. 0.001 for us)')
 	print('  -timeprec N   Number of significant digits in timestamps (0:S, 3:ms, [6:us])')
 	print('  -expandcg     pre-expand the callgraph data in the html output (default: disabled)')
-	print('  -filter list  Limit ftrace to comma-delimited list of functions (default: do_one_initcall)')
-	print(' [commands]')
+	print('  -func list    Limit ftrace to comma-delimited list of functions (default: do_one_initcall)')
+	print('  -cgfilter S   Filter the callgraph output in the timeline')
+	print('  -bl name      Use the following boot loader for kernel params (default: grub)')
 	print('  -reboot       Reboot the machine automatically and generate a new timeline')
-	print('  -manual       Show the requirements to generate a new timeline manually')
-	print('  -dmesg file   Load a stored dmesg file (used with -ftrace)')
-	print('  -ftrace file  Load a stored ftrace file (used with -dmesg)')
+	print('  -manual       Show the steps to generate a new timeline manually (used with -reboot)')
+	print('')
+	print('Other commands:')
 	print('  -flistall     Print all functions capable of being captured in ftrace')
+	print('  -sysinfo      Print out system info extracted from BIOS')
+	print(' [redo]')
+	print('  -dmesg file   Create HTML output using dmesg input (used with -ftrace)')
+	print('  -ftrace file  Create HTML output using ftrace input (used with -dmesg)')
 	print('')
 	return True
 
@@ -727,7 +858,7 @@ if __name__ == '__main__':
 	# loop through the command line arguments
 	cmd = ''
 	testrun = True
-	simplecmds = ['-updategrub', '-flistall']
+	simplecmds = ['-sysinfo', '-kpupdate', '-flistall', '-checkbl']
 	args = iter(sys.argv[1:])
 	for arg in args:
 		if(arg == '-h'):
@@ -736,24 +867,42 @@ if __name__ == '__main__':
 		elif(arg == '-v'):
 			print("Version %s" % sysvals.version)
 			sys.exit()
+		elif(arg == '-verbose'):
+			sysvals.verbose = True
 		elif(arg in simplecmds):
 			cmd = arg[1:]
-		elif(arg == '-f'):
+		elif(arg == '-fstat'):
 			sysvals.useftrace = True
-		elif(arg == '-callgraph'):
+		elif(arg == '-callgraph' or arg == '-f'):
 			sysvals.useftrace = True
 			sysvals.usecallgraph = True
 		elif(arg == '-mincg'):
 			sysvals.mincglen = aslib.getArgFloat('-mincg', args, 0.0, 10000.0)
+		elif(arg == '-cgfilter'):
+			try:
+				val = args.next()
+			except:
+				doError('No callgraph functions supplied', True)
+			sysvals.setCallgraphFilter(val)
+		elif(arg == '-bl'):
+			try:
+				val = args.next()
+			except:
+				doError('No boot loader name supplied', True)
+			if val.lower() not in ['grub']:
+				doError('Unknown boot loader: %s' % val, True)
+			sysvals.bootloader = val.lower()
 		elif(arg == '-timeprec'):
 			sysvals.setPrecision(aslib.getArgInt('-timeprec', args, 0, 6))
 		elif(arg == '-maxdepth'):
 			sysvals.max_graph_depth = aslib.getArgInt('-maxdepth', args, 0, 1000)
-		elif(arg == '-filter'):
+		elif(arg == '-func'):
 			try:
 				val = args.next()
 			except:
 				doError('No filter functions supplied', True)
+			sysvals.useftrace = True
+			sysvals.usecallgraph = True
 			sysvals.rootCheck(True)
 			sysvals.setGraphFilter(val)
 		elif(arg == '-ftrace'):
@@ -810,17 +959,27 @@ if __name__ == '__main__':
 			doError('Ftrace is not properly enabled')
 
 	# run utility commands
+	sysvals.cpuInfo()
 	if cmd != '':
-		if cmd == 'updategrub':
-			updateGrub()
+		if cmd == 'kpupdate':
+			updateKernelParams()
 		elif cmd == 'flistall':
-			sysvals.getFtraceFilterFunctions(False)
+			for f in sysvals.getBootFtraceFilterFunctions():
+				print f
+		elif cmd == 'checkbl':
+			sysvals.getBootLoader()
+			print 'Boot Loader: %s\n%s' % (sysvals.bootloader, sysvals.blexec)
+		elif(cmd == 'sysinfo'):
+			sysvals.printSystemInfo()
 		sys.exit()
 
 	# reboot: update grub, setup a cronjob, and reboot
 	if sysvals.reboot:
+		if (sysvals.useftrace or sysvals.usecallgraph) and \
+			not sysvals.checkFtraceKernelVersion():
+			doError('Ftrace functionality requires kernel v4.10 or newer')
 		if not sysvals.manual:
-			updateGrub()
+			updateKernelParams()
 			updateCron()
 			call('reboot')
 		else:
@@ -830,7 +989,7 @@ if __name__ == '__main__':
 	# cronjob: remove the cronjob, grub changes, and disable ftrace
 	if sysvals.iscronjob:
 		updateCron(True)
-		updateGrub(True)
+		updateKernelParams(True)
 		try:
 			sysvals.fsetVal('0', 'tracing_on')
 		except:
@@ -857,13 +1016,14 @@ if __name__ == '__main__':
 	print('     Boot time: %s' % data.boottime)
 	print('Kernel Version: %s' % sysvals.kernel)
 	print('  Kernel start: %.3f' % (data.start * 1000))
-	print('    init start: %.3f' % (data.initstart * 1000))
+	print('Usermode start: %.3f' % (data.tUserMode * 1000))
+	print('Last Init Call: %.3f' % (data.end * 1000))
 
 	# handle embedded output logs
 	if(sysvals.outfile and sysvals.embedded):
 		fp = open(sysvals.outfile, 'w')
 		fp.write('pass %s initstart %.3f end %.3f boot %s\n' %
-			(data.valid, data.initstart*1000, data.end*1000, data.boottime))
+			(data.valid, data.tUserMode*1000, data.end*1000, data.boottime))
 		fp.close()
 
 	createBootGraph(data)
