@@ -58,6 +58,8 @@ class SystemValues(aslib.SystemValues):
 	trace_wakelock = False
 	trace_cpuidle = False
 	trace_cpufreq = False
+	trace_timer = False
+	trace_hrtimer = False
 	def __init__(self):
 		if('LOG_FILE' in os.environ and 'TEST_RESULTS_IDENTIFIER' in os.environ):
 			self.embedded = True
@@ -101,7 +103,9 @@ class Data(aslib.Data):
 			'wakesource': {'list': dict(), 'start': -1.0, 'end': -1.0, 'row': 0, 'color': '#dddddd'},
 			'wakelock': {'list': dict(), 'start': -1.0, 'end': -1.0, 'row': 0, 'color': '#dddddd'},
 			'cpuidle': {'list': dict(), 'start': -1.0, 'end': -1.0, 'row': 0, 'color': '#dddddd'},
-			'cpufreq': {'list': dict(), 'start': -1.0, 'end': -1.0, 'row': 0, 'color': '#dddddd'}
+			'cpufreq': {'list': dict(), 'start': -1.0, 'end': -1.0, 'row': 0, 'color': '#dddddd'},
+			'timer': {'list': dict(), 'start': -1.0, 'end': -1.0, 'row': 0, 'color': '#dddddd'},
+			'hrtimer': {'list': dict(), 'start': -1.0, 'end': -1.0, 'row': 0, 'color': '#dddddd'},
 		}
 	def deviceTopology(self):
 		return ''
@@ -129,16 +133,10 @@ def dumpFtraceData():
 	for phase in data.dmesg:
 		for item in data.dmesg[phase]['list']:
 			print (phase, data.dmesg[phase]['list'][item], data.dmesg[phase]['list'][item]['name'], data.dmesg[phase]['list'][item]['start'], data.dmesg[phase]['list'][item]['end'])
-	print
-	print data.dmesg
+
 	print 
-	print data.dmesg['cpufreq']
-	print 
-	print data.dmesg['cpufreq']['list']
-	print 
-	print data.dmesg['cpufreq']['start']
-	print 
-	print data.dmesg['cpufreq']['end']
+	print data.dmesg['hrtimer']['list']
+
 
 # Function: parseFtraceLog
 # Description:
@@ -149,6 +147,8 @@ def parseFtraceLog():
 	data.dmesg['wakelock']['start'] = data.start = ktime = 0.0
 	data.dmesg['cpuidle']['start'] = data.start = ktime = 0.0
 	data.dmesg['cpufreq']['start'] = data.start = ktime = 0.0
+	data.dmesg['timer']['start'] = data.start = ktime = 0.0
+	data.dmesg['hrtimer']['start'] = data.start = ktime = 0.0
 
 	sysvals.stamp = {
 		'time': datetime.now().strftime('%B %d %Y, %I:%M:%S %p'),
@@ -187,8 +187,10 @@ def parseFtraceLog():
 		if (sysvals.trace_wakeup_source):
 			m = re.match('^wakeup_source_activate: *(?P<f>.*) .*', msg)
 			if(m):
+				if (data.start==0.0):
+					data.start = ktime
 				if (data.dmesg['wakesource']['start']==0.0):
-					data.dmesg['wakesource']['start'] = data.start = ktime
+					data.dmesg['wakesource']['start'] = ktime
 				devtemp[m.group('f')] = ktime
 				continue
 
@@ -208,8 +210,10 @@ def parseFtraceLog():
 		if (sysvals.trace_wakelock):
 			m = re.match('^pm_wake_lock: *(?P<f>.*)', msg)
 			if(m):
+				if (data.start==0.0):
+					data.start = ktime
 				if (data.dmesg['wakelock']['start']==0.0):
-					data.dmesg['wakelock']['start'] = data.start = ktime
+					data.dmesg['wakelock']['start'] = ktime
 				devtemp[m.group('f')] = ktime
 				continue
 			m = re.match('^pm_wake_unlock: *(?P<f>.*)', msg)
@@ -228,8 +232,10 @@ def parseFtraceLog():
 		if (sysvals.trace_cpuidle):
 			m = re.match('^cpu_idle: state=(?P<state>[0-9]*) *cpu_id=(?P<f>.*)', msg)
 			if(m):
+				if (data.start==0.0):
+					data.start = ktime
 				if (data.dmesg['cpuidle']['start']==0.0):
-					data.dmesg['cpuidle']['start'] = data.start = ktime
+					data.dmesg['cpuidle']['start'] = ktime
 				state = int(m.group('state'))
 				if state < 2:
 					if state == 0:
@@ -254,8 +260,10 @@ def parseFtraceLog():
 		if (sysvals.trace_cpufreq):
 			m = re.match('^cpu_frequency: state=(?P<freq>[0-9]*) *cpu_id=(?P<f>.*)', msg)
 			if(m):
+				if (data.start==0.0):
+					data.start = ktime
 				if (data.dmesg['cpufreq']['start']==0.0):
-					data.dmesg['cpufreq']['start'] = data.start = ktime
+					data.dmesg['cpufreq']['start'] = ktime
 				r = 0
 				t = 0.01
 				f = m.group('f')
@@ -263,12 +271,66 @@ def parseFtraceLog():
 				data.valid = True
 				data.newAction('cpufreq', f+'-'+freq, ktime, ktime + t, int(r), int(t))
 				#print ('cpufreq', f, freq, ktime)
+				data.dmesg['cpufreq']['end'] = ktime
 				data.end = ktime + t
+	#timer processing
+		if (sysvals.trace_timer):
+			m = re.match('^timer_start: timer=(?P<f>[0-9a-f]*) *function=(?P<function>.*) *expires=.*', msg)
+			if(m):
+				if (data.start==0.0):
+					data.start = ktime
+				if (data.dmesg['timer']['start']==0.0):
+					data.dmesg['timer']['start'] = ktime
+				devtemp[m.group('f')] = ktime
+				continue
+
+			m = re.match('^timer_expire_entry: timer=(?P<f>[0-9a-f]*) function=(?P<function>.*) now=.*', msg)
+			if(m):
+				data.valid = True
+				f = m.group('f')
+				function = m.group('function')
+				r = 0
+				if(f in devtemp):
+					t = ktime - devtemp[m.group('f')]
+					data.newAction('timer', f, devtemp[f], ktime, int(r), int(t))
+					data.dmesg['timer']['end'] = ktime
+					data.end = ktime
+					print ('timer', f, function)
+					del devtemp[f]
+				continue
+
+	#hrtimer processing
+		if (sysvals.trace_hrtimer):
+			m = re.match('^hrtimer_start: hrtimer=(?P<f>[0-9a-f]*) *function=(?P<function>.*) *expires=.*', msg)
+			if(m):
+				if (data.start==0.0):
+					data.start = ktime
+				if (data.dmesg['hrtimer']['start']==0.0):
+					data.dmesg['hrtimer']['start'] = ktime
+				devtemp[m.group('f')] = ktime
+				continue
+
+			m = re.match('^hrtimer_expire_entry: hrtimer=(?P<f>[0-9a-f]*) function=(?P<function>.*) now=.*', msg)
+			if(m):
+				data.valid = True
+				f = m.group('f')
+				function = m.group('function')
+				r = 0
+				if(f in devtemp):
+					t = ktime - devtemp[m.group('f')]
+					data.newAction('hrtimer', f, devtemp[f], ktime, int(r), int(t))
+					data.dmesg['hrtimer']['end'] = ktime
+					data.end = ktime
+					print ('hrtimer', f, function)
+					del devtemp[f]
+				continue
 
 	data.dmesg['wakesource']['end'] = data.end
 	data.dmesg['wakelock']['end'] = data.end
 	data.dmesg['cpuidle']['end'] = data.end
 	data.dmesg['cpufreq']['end'] = data.end
+	data.dmesg['timer']['end'] = data.end
+	data.dmesg['hrtimer']['end'] = data.end
 
 	lf.close()
 	return data
@@ -325,6 +387,10 @@ if __name__ == '__main__':
 			sysvals.trace_cpuidle = True
 		elif(arg == '-cpufreq'):
 			sysvals.trace_cpufreq = True
+		elif(arg == '-timer'):
+			sysvals.trace_timer = True
+		elif(arg == '-hrtimer'):
+			sysvals.trace_hrtimer = True
 		elif(arg == '-ftrace'):
 			try:
 				val = args.next()
