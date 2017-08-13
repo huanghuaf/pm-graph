@@ -1,0 +1,51 @@
+# tracer: nop
+#
+# entries-in-buffer/entries-written: 66426/66426   #P:4
+#
+#                              _-----=> irqs-off
+#                             / _----=> need-resched
+#                            | / _---=> hardirq/softirq
+#                            || / _--=> preempt-depth
+#                            ||| /     delay
+#           TASK-PID   CPU#  ||||    TIMESTAMP  FUNCTION
+#              | |       |   ||||       |         |
+          <idle>-0     [001] d..1    83.906964: cpu_idle: state=0 cpu_id=1
+          <idle>-0     [001] d..1    83.908531: cpu_idle: state=4294967295 cpu_id=1
+          <idle>-0     [001] d..1    83.908582: cpu_idle: state=0 cpu_id=1
+          <idle>-0     [001] d..1    83.912533: cpu_idle: state=4294967295 cpu_id=1
+          <idle>-0     [001] d..1    83.912559: cpu_idle: state=0 cpu_id=1
+          <idle>-0     [001] d..1    83.916531: cpu_idle: state=4294967295 cpu_id=1
+          <idle>-0     [001] d..1    83.916572: cpu_idle: state=0 cpu_id=1
+          <idle>-0     [001] d..1    83.916601: cpu_idle: state=4294967295 cpu_id=1
+          <idle>-0     [001] d..1    83.916609: cpu_idle: state=0 cpu_id=1
+          <idle>-0     [001] d..1    83.918469: cpu_idle: state=4294967295 cpu_id=1
+          <idle>-0     [001] d..1    83.918475: cpu_idle: state=0 cpu_id=1
+          <idle>-0     [001] dn.1    83.918511: cpu_idle: state=4294967295 cpu_id=1
+          <idle>-0     [001] d..1    83.918635: cpu_idle: state=0 cpu_id=1
+          <idle>-0     [001] d..1    83.918643: cpu_idle: state=4294967295 cpu_id=1
+   kworker/u16:0-6     [000] d..3   105.664843: wakeup_source_activate: NETLINK state=0x470001
+         healthd-1887  [001] d..1   105.665075: wakeup_source_activate: eventpoll state=0x470002
+         healthd-1887  [001] d..1   105.665081: wakeup_source_deactivate: NETLINK state=0x480001
+         healthd-1887  [001] d..1   105.665089: wakeup_source_activate: NETLINK state=0x480002
+         healthd-1887  [001] d..2   105.665094: wakeup_source_deactivate: eventpoll state=0x490001
+         healthd-1887  [001] d..1   105.665441: wakeup_source_activate: eventpoll state=0x490002
+         healthd-1887  [001] d..1   105.665448: wakeup_source_deactivate: NETLINK state=0x4a0001
+         healthd-1887  [001] d..1   105.665453: wakeup_source_activate: NETLINK state=0x4a0002
+         healthd-1887  [001] d..2   105.665458: wakeup_source_deactivate: eventpoll state=0x4b0001
+         healthd-1887  [001] d..1   105.665482: wakeup_source_activate: eventpoll state=0x4b0002
+         healthd-1887  [001] d..1   105.665487: wakeup_source_deactivate: NETLINK state=0x4c0001
+         healthd-1887  [001] d..2   105.665491: wakeup_source_deactivate: eventpoll state=0x4d0000
+    kschedfreq:0-1111  [000] ....   105.666196: cpu_frequency: state=1200000 cpu_id=0
+    kschedfreq:0-1111  [000] ....   105.666215: cpu_frequency: state=1200000 cpu_id=1
+    kschedfreq:0-1111  [000] ....   105.666218: cpu_frequency: state=1200000 cpu_id=2
+    kschedfreq:0-1111  [000] ....   105.666220: cpu_frequency: state=1200000 cpu_id=3
+            init-1     [001] d.h1  1505.965422: hrtimer_start: hrtimer=ffffffc077f1d5e8 function=tick_sched_timer expires=1505920000000 softexpires=1505920000000
+          <idle>-0     [001] d.h2  1505.968868: hrtimer_cancel: hrtimer=ffffffc077f1d5e8
+          <idle>-0     [001] d.h1  1505.968871: hrtimer_expire_entry: hrtimer=ffffffc077f1d5e8 function=tick_sched_timer now=1505920354022
+          <idle>-0     [001] d.h1  1505.968907: hrtimer_expire_exit: hrtimer=ffffffc077f1d5e8
+            init-1     [001] ....  1505.965569: timer_init: timer=ffffffc074338258
+            init-1     [004] d..1  1505.980740: timer_cancel: timer=ffffffc074338258
+            init-1     [004] d..1  1505.980746: timer_start: timer=ffffffc074338258 function=delayed_work_timer_fn expires=4295269030 [timeout=250] flags=0x15600001
+          <idle>-0     [004] d.s2  1506.989214: timer_cancel: timer=ffffffc074338258
+          <idle>-0     [004] d.s1  1506.989222: timer_expire_entry: timer=ffffffc074338258 function=delayed_work_timer_fn now=4295269032
+          <idle>-0     [004] dns1  1506.989308: timer_expire_exit: timer=ffffffc074338258
