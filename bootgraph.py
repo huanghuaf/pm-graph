@@ -33,6 +33,7 @@ import shutil
 from datetime import datetime, timedelta
 from subprocess import call, Popen, PIPE
 import sleepgraph as aslib
+import csv
 
 # ----------------- CLASSES --------------------
 
@@ -48,6 +49,7 @@ class SystemValues(aslib.SystemValues):
 	kernel = ''
 	dmesgfile = ''
 	ftracefile = ''
+	csvfile = 'devinit.csv'
 	htmlfile = 'bootgraph.html'
 	testdir = ''
 	kparams = ''
@@ -300,6 +302,9 @@ def parseKernelLog():
 		lf = open(sysvals.dmesgfile, 'r')
 	else:
 		lf = Popen('dmesg', stdout=PIPE).stdout
+	csvfile = open(sysvals.csvfile, 'wb');
+	csvwriter = csv.writer(csvfile)
+	csvwriter.writerow(['Func', 'Start(ms)', 'End(ms)', 'Duration(ms)', 'Return'])
 	for line in lf:
 		line = line.replace('\r\n', '')
 		# grab the stamp and sysinfo
@@ -351,6 +356,7 @@ def parseKernelLog():
 			if(f in devtemp):
 				start, pid = devtemp[f]
 				data.newAction(phase, f, pid, start, ktime, int(r), int(t))
+				csvwriter.writerow([f, start*1000, ktime*1000, float(t)/1000, int(r)]);
 				del devtemp[f]
 			continue
 		if(re.match('^Freeing init kernel memory.*', msg)):
@@ -364,6 +370,7 @@ def parseKernelLog():
 		sysvals.stamp = 0
 		tp.parseStamp(data, sysvals)
 	data.dmesg['user']['end'] = data.end
+	csvfile.close()
 	lf.close()
 	return data
 
