@@ -63,6 +63,7 @@ class SystemValues(aslib.SystemValues):
 	timeformat = '%.6f'
 	bootloader = 'grub'
 	blexec = []
+	last_init=0
 	def __init__(self):
 		self.hostname = platform.node()
 		self.testtime = datetime.now().strftime('%Y-%m-%d_%H:%M:%S')
@@ -223,7 +224,7 @@ class Data(aslib.Data):
 			'kernel': {'list': dict(), 'start': -1.0, 'end': -1.0, 'row': 0,
 				'order': 0, 'color': 'linear-gradient(to bottom, #fff, #bcf)'},
 			'user': {'list': dict(), 'start': -1.0, 'end': -1.0, 'row': 0,
-				'order': 1, 'color': '#fff'}
+				'order': 1, 'color': 'linear-gradient(to bottom, #456, #cde)'}
 		}
 	def deviceTopology(self):
 		return ''
@@ -345,17 +346,18 @@ def parseKernelLog():
 		m = re.match('^initcall *(?P<f>.*)\+.* returned (?P<r>.*) after (?P<t>.*) usecs', msg)
 		if(m):
 			data.valid = True
-			data.end = ktime
+			sysvals.last_init = '%.0f'%(ktime*1000)
 			f, r, t = m.group('f', 'r', 't')
 			if(f in devtemp):
 				start, pid = devtemp[f]
 				data.newAction(phase, f, pid, start, ktime, int(r), int(t))
 				del devtemp[f]
 			continue
-		if(re.match('^Freeing unused kernel memory.*', msg)):
+		if(re.match('^Freeing init kernel memory.*', msg)):
 			data.tUserMode = ktime
 			data.dmesg['kernel']['end'] = ktime
 			data.dmesg['user']['start'] = ktime
+			data.end = ktime+0.1
 			phase = 'user'
 
 	if tp.stamp:
@@ -531,8 +533,8 @@ def createBootGraph(data):
 		print('ERROR: No timeline data')
 		return False
 	user_mode = '%.0f'%(data.tUserMode*1000)
-	last_init = '%.0f'%(tTotal*1000)
-	devtl.html += html_timetotal.format(user_mode, last_init)
+	#last_init = '%.0f'%(tTotal*1000)
+	devtl.html += html_timetotal.format(user_mode, sysvals.last_init)
 
 	# determine the maximum number of rows we need to draw
 	devlist = []
